@@ -1,0 +1,17 @@
+# Data exports (often large / contain licensed WRDS data — do not commit)
+data/*.xlsx
+data/*.csv
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# SAS work libraries
+*.sas7bdat
+*.sas7bcat
