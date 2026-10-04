@@ -40,8 +40,14 @@ options notes stimer source mprint;
 ---------------------------------------------------------------------------*/
 %let funda_tbl    = comp.funda;
 %let company_tbl  = comp.company;
-%let ccm_link_tbl = crsp.ccmxpf_lnkhist;
-%let sp500_tbl    = crsp.msp500list;
+/* S&P 500 membership. 01 uses CRSP (msp500list via the CCM link) when
+   both CRSP tables are readable, otherwise the Compustat index-constituent
+   history (&sp500_idx_tbl, S&P 500 = gvkeyx '000003'), which needs no
+   PERMNO link. Run %access_report (below) to see which you are licensed for. */
+%let ccm_link_tbl  = crsp.ccmxpf_lnkhist;
+%let sp500_tbl     = crsp.msp500list;
+%let sp500_idx_tbl = comp.idxcst_his;
+%let sp500_gvkeyx  = 000003;
 
 /* GVKEY -> CIK link with validity dates. If this table does not exist,
    03 falls back to comp.company.cik (current CIK only, no history).       */
@@ -93,6 +99,7 @@ libname _outdir clear;
 /*
 proc contents data=&ccm_link_tbl  short; run;   -- gvkey lpermno linktype linkprim linkdt linkenddt
 proc contents data=&sp500_tbl     short; run;   -- permno start ending
+proc contents data=&sp500_idx_tbl short; run;   -- gvkey iid gvkeyx from thru
 proc contents data=&cik_link_tbl  short; run;   -- gvkey cik datadate1 datadate2
 proc contents data=&mda_tbl;              run;   -- cik / date / form / text column names + text LENGTH
 proc contents data=&rf_tbl;               run;
@@ -134,19 +141,78 @@ proc contents data=&rf_tbl;               run;
 %mend winsorize;
 
 /*===========================================================================
+  %can_read -- function-style macro: resolves to 1 if DS can be opened for
+  reading, 0 if it is missing OR the user is not licensed for it.
+  (EXIST() returns 1 for a table you cannot read; OPEN() fails silently.)
+===========================================================================*/
+%macro can_read(ds);
+  %local dsid rc;
+  %let dsid = %sysfunc(open(&ds));
+  %if &dsid > 0 %then %do;
+    %let rc = %sysfunc(close(&dsid));
+    1
+  %end;
+  %else 0
+%mend can_read;
+
+/*===========================================================================
+  %access_report -- one log line per source table: readable or not.
+===========================================================================*/
+%macro access_report;
+  %local tbls i t;
+  %let tbls = &funda_tbl &company_tbl &sp500_idx_tbl &ccm_link_tbl &sp500_tbl
+              &cik_link_tbl &mda_tbl &rf_tbl;
+  %do i = 1 %to %sysfunc(countw(&tbls, %str( )));
+    %let t = %scan(&tbls, &i, %str( ));
+    %if %can_read(&t) = 1 %then %put NOTE: [access] &t is readable.;
+    %else %put WARNING: [access] &t is NOT readable (missing or not licensed).;
+  %end;
+%mend access_report;
+%access_report;
+
+/*===========================================================================
+  %require_readable -- stop the submission if any listed table cannot be
+  read, instead of letting every downstream step fail on empty inputs.
+===========================================================================*/
+%macro require_readable(tbls);
+  %local i t bad;
+  %let bad = 0;
+  %do i = 1 %to %sysfunc(countw(&tbls, %str( )));
+    %let t = %scan(&tbls, &i, %str( ));
+    %if %can_read(&t) = 0 %then %do;
+      %put ERROR: [require_readable] Cannot read &t (missing or not licensed).;
+      %let bad = 1;
+    %end;
+  %end;
+  %if &bad = 1 %then %abort cancel;
+%mend require_readable;
+
+/*===========================================================================
   %assert_unique -- write an ERROR to the log if DSN is not unique on KEYS.
   Data-step MERGE with duplicate keys on both sides is silently wrong, so
-  every join output is checked.
+  every join output is checked. A missing data set or failed query is
+  itself an ERROR (previously two empty counts compared equal and the
+  macro reported a false pass).
 ===========================================================================*/
 %macro assert_unique(dsn=, keys=);
   %local keylist nrows nkeys;
+  %if not %sysfunc(exist(&dsn)) %then %do;
+    %put ERROR: [assert_unique] &dsn does not exist -- an upstream step failed.;
+    %return;
+  %end;
+
   %let keylist = %sysfunc(translate(%sysfunc(compbl(&keys)), %str(,), %str( )));
+  %let nrows = ;
+  %let nkeys = ;
   proc sql noprint;
     select count(*) into :nrows trimmed from &dsn;
     select count(*) into :nkeys trimmed
       from (select distinct &keylist from &dsn);
   quit;
-  %if &nrows ne &nkeys %then
+
+  %if %length(&nrows) = 0 or %length(&nkeys) = 0 %then
+    %put ERROR: [assert_unique] could not count rows/keys of &dsn (check keys: &keys).;
+  %else %if &nrows ne &nkeys %then
     %put ERROR: [assert_unique] &dsn has %eval(&nrows - &nkeys) duplicate row(s) on (&keys).;
   %else
     %put NOTE: [assert_unique] &dsn is unique on (&keys): &nrows rows.;
