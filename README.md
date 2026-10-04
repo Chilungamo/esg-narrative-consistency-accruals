@@ -37,6 +37,8 @@ esg-narrative-consistency-accruals/
 ├── index.html                          # GitHub Pages copy of the dashboard (synthetic)
 ├── sas/
 │   ├── run_all.sas                     # Driver: runs 00 → 05 in one session
+│   ├── run_all.sh                      # WRDS Cloud batch job (qsub) for run_all.sas
+│   ├── check_log.py                    # Summarises run_all.log: errors/warnings per program
 │   ├── 00_setup_libraries.sas          # Parameters, WRDS libraries, %winsorize, %assert_unique
 │   ├── 01_sp500_universe.sas           # Full Compustat universe + CCM link + S&P 500 flag
 │   ├── 02_modified_jones_dac.sas       # Modified Jones DA (full universe) + KLW performance matching
@@ -57,16 +59,40 @@ esg-narrative-consistency-accruals/
 
 ## Pipeline
 
-### 1. SAS layer (runs on WRDS SAS Studio)
+### 1. SAS layer (runs on WRDS)
 
 Edit the parameters at the top of `00_setup_libraries.sas` (paths, sample years) and
 **verify the source-table names** with the diagnostics block in that file — in
 particular the GVKEY–CIK link table and the MD&A / Risk Factor text tables, whose
 names and column names are parameters (`&cik_link_tbl`, `&mda_tbl`, `&rf_tbl`, …).
-Then set `code_path` in `run_all.sas` and run it:
+Output goes to `$HOME/esg_accruals` by default (set `wrds_path` to change it).
+
+**Batch on WRDS Cloud (recommended for a full run).** Copy the `sas/` folder to
+`~/esg_accruals/sas` on WRDS Cloud (e.g. `scp -r sas <user>@wrds-cloud.wharton.upenn.edu:esg_accruals/`
+or `git clone` the repo there), then:
+
+```bash
+ssh <user>@wrds-cloud.wharton.upenn.edu     # Duo approval required
+cd ~/esg_accruals/sas
+qsub run_all.sh                             # submit; qstat shows status
+# when the job is done:
+cat run_all.check.txt                       # errors / warnings per program
+```
+
+`run_all.sh` writes `run_all.log`, `run_all.lst` and `run_all.check.txt`
+(the output of `check_log.py`). The checker attributes every `ERROR`,
+non-routine `WARNING` and suspicious `NOTE` (uninitialized variables,
+many-to-many MERGE, missing values generated, syntax-check mode, …) to the
+program that produced it, and lists the `%assert_unique` results and the
+row count of every dataset written. It can be run on any log:
+`python3 check_log.py run_all.log [--strict]`. If WRDS's grid scheduler has
+changed, run the same command directly: `CODE_PATH=$PWD sas run_all.sas`.
+
+**Interactive in SAS Studio:**
 
 ```sas
-%include "/home/youruser/esg_accruals/sas/run_all.sas";
+%let code_path = /home/<inst>/<user>/esg_accruals/sas;
+%include "&code_path./run_all.sas";
 ```
 
 All steps share one WORK library, so run them in a single session. Each join is

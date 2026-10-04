@@ -12,7 +12,13 @@ options notes stimer source mprint;
 /*---------------------------------------------------------------------------
   PARAMETERS -- edit these for your environment
 ---------------------------------------------------------------------------*/
-%let wrds_path = /home/youruser;
+/* Defaults to your WRDS home directory ($HOME); override by setting
+   wrds_path before including this file.                                  */
+%macro _set_wrds_path;
+  %global wrds_path;
+  %if %length(&wrds_path) = 0 %then %let wrds_path = %sysget(HOME);
+%mend _set_wrds_path;
+%_set_wrds_path
 %let out_path  = &wrds_path./esg_accruals;
 %let start_yr  = 1994;
 %let end_yr    = 2024;
