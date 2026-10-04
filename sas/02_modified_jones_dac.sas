@@ -1,173 +1,177 @@
 /*===========================================================================
   02_modified_jones_dac.sas
-  Modified Jones Model with performance-matched discretionary accruals
-  (Jones 1991; Dechow, Sloan & Sweeney 1995; Kothari, Leone & Wasley 2005)
+  Cross-sectional modified Jones model and performance-matched
+  discretionary accruals.
+  (Jones 1991; Dechow, Sloan & Sweeney 1995; Kothari, Leone & Wasley 2005;
+   Hribar & Collins 2002 for cash-flow total accruals)
 
-  Input:  WORK.universe (from 01_sp500_universe.sas)
-  Output: WORK.DA_final — firm-year panel with DAC, ABS_DAC, PM_DAC, ABS_PM_DAC
+  The model is estimated on the FULL non-financial Compustat universe by
+  SIC2 x fyear; the S&P 500 sample is selected only afterwards. Estimating
+  on S&P 500 firms alone leaves most SIC2-year cells below &min_cell_n and
+  makes decile-based performance matching degenerate.
+
+  Input:  WORK.comp_full (from 01_sp500_universe.sas)
+  Output: WORK.DA_final    -- S&P 500 firm-years with DAC, ABS_DAC,
+                              PM_DAC, ABS_PM_DAC
+          WORK.jones_coefs -- coefficients by SIC2 x fyear
 ===========================================================================*/
 
 /*---------------------------------------------------------------------------
-  Step 2.1 — Balance-sheet total accruals + Jones model regressors
+  Step 2.1 -- Total accruals + Jones regressors.
+  Lags come from the immediately preceding FISCAL YEAR, not the preceding
+  row: a gap in the panel leaves the lag missing.
 ---------------------------------------------------------------------------*/
-proc sort data=universe out=univ_sorted; by gvkey fyear; run;
+proc sort data=comp_full; by gvkey fyear; run;
 
 data accruals_raw;
-  set univ_sorted;
+  set comp_full;
   by gvkey fyear;
 
-  retain at_lag act_lag che_lag lct_lag dlc_lag sale_lag rect_lag;
+  /* LAG() is a queue: call it on every iteration, then null it out when
+     the previous row is not the previous fiscal year of the same firm.   */
+  fyear_lag = lag(fyear);
+  at_lag    = lag(at);
+  sale_lag  = lag(sale);
+  rect_lag  = lag(rect);
 
-  if first.gvkey then do;
-    at_lag=.; act_lag=.; che_lag=.; lct_lag=.; dlc_lag=.;
-    sale_lag=.; rect_lag=.;
-  end;
+  if first.gvkey or fyear_lag ne fyear - 1 then
+    call missing(at_lag, sale_lag, rect_lag);
 
   if not missing(at_lag) and at_lag > 0 then do;
-    dCA   = act  - act_lag;
-    dCash = che  - che_lag;
-    dCL   = lct  - lct_lag;
-    dSTD  = dlc  - dlc_lag;
-    Dep   = dp;
-    dSALE = sale - sale_lag;
-    dRECT = rect - rect_lag;
-
-    /* Total accruals scaled by lagged assets */
-    TA = (dCA - dCash - dCL + dSTD - Dep) / at_lag;
+    /* Total accruals, cash-flow approach (post-SFAS 95), scaled by lagged
+       assets: TA = [IB - (OANCF - XIDOC)] / AT_{t-1}                       */
+    if nmiss(ib, oancf) = 0 then
+      TA = (ib - (oancf - coalesce(xidoc, 0))) / at_lag;
 
     /* Jones model regressors */
-    dREV_adj  = (dSALE - dRECT) / at_lag;   /* DeltaREV net of DeltaREC */
-    PPE_sc    = ppegt / at_lag;
-    ASSETS_sc = 1 / at_lag;                  /* intercept deflator      */
+    if nmiss(sale, sale_lag, rect, rect_lag) = 0 then
+      dREV_adj = ((sale - sale_lag) - (rect - rect_lag)) / at_lag;
+    if not missing(ppegt) then
+      PPE_sc = ppegt / at_lag;
+    ASSETS_sc = 1 / at_lag;
 
-    /* Performance control */
-    ROA = ib / ((at + at_lag) / 2);
+    /* Performance control: IB / average total assets */
+    if not missing(ib) then
+      ROA = ib / ((at + at_lag) / 2);
   end;
 
-  at_lag   = at;
-  act_lag  = act;
-  che_lag  = che;
-  lct_lag  = lct;
-  dlc_lag  = dlc;
-  sale_lag = sale;
-  rect_lag = rect;
-
-  /* 2-digit SIC for industry grouping */
-  SIC2 = int(sich / 100);
-
-  /* Exclude financials (SIC 60-69) and utilities (SIC 49) */
-  if 60 <= SIC2 <= 69 then delete;
+  /* 2-digit SIC; drop missing industry, financials (60-69), utilities (49) */
+  SIC2 = int(sic_final / 100);
+  if missing(SIC2)     then delete;
+  if 60 <= SIC2 <= 69  then delete;
   if SIC2 = 49         then delete;
 
-  if missing(TA) or missing(dREV_adj) or missing(PPE_sc) or missing(ASSETS_sc)
-    then delete;
+  /* The leading year (&start_yr - 1) only supplies lags */
+  if fyear < &start_yr then delete;
 
-  label TA        = 'Total Accruals / Lagged Assets'
+  if nmiss(TA, dREV_adj, PPE_sc, ASSETS_sc) > 0 then delete;
+
+  drop fyear_lag sale_lag rect_lag;
+
+  label TA        = 'Total Accruals (IB - CFO excl. XI) / Lagged Assets'
         dREV_adj  = '(dSALES - dREC) / Lagged Assets'
         PPE_sc    = 'Gross PP&E / Lagged Assets'
-        ASSETS_sc = '1 / Lagged Assets (intercept deflator)'
-        ROA       = 'Return on Assets';
+        ASSETS_sc = '1 / Lagged Assets'
+        ROA       = 'IB / Average Total Assets';
 run;
 
 /*---------------------------------------------------------------------------
-  Step 2.2 — Winsorize macro (1%/99% by fiscal year)
+  Step 2.2 -- Winsorize model inputs at 1/99 by fiscal year (full universe)
 ---------------------------------------------------------------------------*/
-%macro winsorize(dsn=, var=, byvar=fyear, pct=1);
-  %local lo hi;
-  %let lo = &pct;
-  %let hi = %eval(100 - &pct);
-
-  proc sort data=&dsn; by &byvar; run;
-
-  proc univariate data=&dsn noprint;
-    by &byvar;
-    var &var;
-    output out=_wintmp_ pctlpts=&lo &hi pctlpre=_p_;
-  run;
-
-  data &dsn;
-    merge &dsn _wintmp_;
-    by &byvar;
-    if not missing(_p_&lo) and not missing(_p_&hi) then
-      &var = max(_p_&lo, min(&var, _p_&hi));
-    drop _p_&lo _p_&hi;
-  run;
-
-  proc datasets library=work nolist; delete _wintmp_; run; quit;
-%mend;
-
-%winsorize(dsn=accruals_raw, var=TA,       byvar=fyear);
-%winsorize(dsn=accruals_raw, var=dREV_adj, byvar=fyear);
-%winsorize(dsn=accruals_raw, var=PPE_sc,   byvar=fyear);
-%winsorize(dsn=accruals_raw, var=ROA,      byvar=fyear);
+%winsorize(dsn=accruals_raw, vars=TA dREV_adj PPE_sc ASSETS_sc ROA, byvar=fyear);
 
 /*---------------------------------------------------------------------------
-  Step 2.3 — Require >= 10 observations per SIC2-year cell
+  Step 2.3 -- Require >= &min_cell_n firm-years per SIC2 x fyear cell
+  (ORDER BY leaves the table sorted for the BY-group regression.)
 ---------------------------------------------------------------------------*/
 proc sql;
-  create table ind_yr_n as
-  select SIC2, fyear, count(*) as n_obs
+  create table accruals_est as
+  select *, count(*) as n_cell
   from accruals_raw
-  group by SIC2, fyear;
+  group by SIC2, fyear
+  having count(*) >= &min_cell_n
+  order by SIC2, fyear;
 quit;
 
-data accruals_est;
-  merge accruals_raw ind_yr_n;
+/*---------------------------------------------------------------------------
+  Step 2.4 -- Cross-sectional modified Jones OLS by SIC2 x fyear.
+  Intercept included alongside 1/A_{t-1} (Kothari et al. 2005).
+---------------------------------------------------------------------------*/
+proc reg data=accruals_est outest=jones_coefs edf noprint;
   by SIC2 fyear;
-  if n_obs < 10 then delete;
+  model TA = ASSETS_sc dREV_adj PPE_sc;
+  output out=jones_output p=NDAC r=DAC;
 run;
+quit;
 
 /*---------------------------------------------------------------------------
-  Step 2.4 — Cross-sectional Modified Jones OLS by SIC2 x year (no intercept)
+  Step 2.5 -- Performance matching (Kothari, Leone & Wasley 2005):
+  each firm-year is matched to the OTHER firm in its SIC2 x fyear cell with
+  the closest ROA, and PM_DAC = DAC - DAC_match.
+
+  After sorting by (SIC2, fyear, ROA), the nearest-ROA neighbour is always
+  the previous or the next row in the same cell, so the match is one sort
+  plus a lag/lead pass -- O(n log n), no self-join.
 ---------------------------------------------------------------------------*/
-proc sort data=accruals_est; by SIC2 fyear; run;
-
-proc reg data=accruals_est outest=jones_coefs noprint;
-  by SIC2 fyear;
-  model TA = ASSETS_sc dREV_adj PPE_sc / noint;
-  output out=jones_output r=NDA_error p=NDAC;
+proc sort data=jones_output (where=(nmiss(ROA, DAC) = 0)) out=pm_base;
+  by SIC2 fyear ROA gvkey;
 run;
 
-data jones_output;
-  set jones_output;
-  DAC     = TA - NDAC;
-  ABS_DAC = abs(DAC);
+data pm_match (keep=gvkey fyear DAC_match);
+  /* Look-ahead idiom: a second SET starting at row 2 supplies lead values */
+  set pm_base (keep=gvkey fyear SIC2 ROA DAC) end=_last;
+  if not _last then
+    set pm_base (firstobs=2 keep=SIC2 fyear ROA DAC
+                 rename=(SIC2=_sic_next fyear=_yr_next ROA=_roa_next DAC=_dac_next));
+  else call missing(_sic_next, _yr_next, _roa_next, _dac_next);
+
+  _sic_prev = lag(SIC2);
+  _yr_prev  = lag(fyear);
+  _roa_prev = lag(ROA);
+  _dac_prev = lag(DAC);
+
+  has_prev = (_n_ > 1 and _sic_prev = SIC2 and _yr_prev = fyear);
+  has_next = (_sic_next = SIC2 and _yr_next = fyear);
+
+  if has_prev and has_next then do;
+    if abs(ROA - _roa_prev) <= abs(_roa_next - ROA) then DAC_match = _dac_prev;
+    else DAC_match = _dac_next;
+  end;
+  else if has_prev then DAC_match = _dac_prev;
+  else if has_next then DAC_match = _dac_next;
 run;
+
+proc sql;
+  create table jones_pm as
+  select a.*, b.DAC_match
+  from jones_output a
+  left join pm_match b
+    on a.gvkey = b.gvkey and a.fyear = b.fyear;
+quit;
 
 /*---------------------------------------------------------------------------
-  Step 2.5 — Performance-matched discretionary accruals (Kothari et al. 2005)
+  Step 2.6 -- Keep S&P 500 members
 ---------------------------------------------------------------------------*/
-proc sort data=jones_output; by SIC2 fyear ROA; run;
-
-proc rank data=jones_output out=jones_ranked groups=10;
-  by SIC2 fyear;
-  var ROA;
-  ranks ROA_decile;
-run;
-
-proc sort data=jones_ranked; by SIC2 fyear ROA_decile; run;
-
-proc means data=jones_ranked noprint;
-  by SIC2 fyear ROA_decile;
-  var DAC;
-  output out=median_dac median=median_DAC;
-run;
-
-proc sort data=median_dac; by SIC2 fyear ROA_decile; run;
-
 data DA_final;
-  merge jones_ranked
-        median_dac (keep=SIC2 fyear ROA_decile median_DAC);
-  by SIC2 fyear ROA_decile;
-  PM_DAC     = DAC - median_DAC;
-  ABS_PM_DAC = abs(PM_DAC);
-  label DAC        = 'Jones DA'
-        ABS_DAC    = '|Jones DA|'
-        PM_DAC     = 'Performance-Matched DA'
+  set jones_pm;
+  where sp500 = 1;
+
+  ABS_DAC = abs(DAC);
+  if nmiss(DAC, DAC_match) = 0 then do;
+    PM_DAC     = DAC - DAC_match;
+    ABS_PM_DAC = abs(PM_DAC);
+  end;
+
+  label DAC        = 'Modified Jones DA'
+        ABS_DAC    = '|Modified Jones DA|'
+        PM_DAC     = 'Performance-Matched DA (nearest ROA, same SIC2-year)'
         ABS_PM_DAC = '|Performance-Matched DA|';
 run;
 
+%assert_unique(dsn=DA_final, keys=gvkey fyear);
+
 proc means data=DA_final n mean std p25 median p75;
   var TA NDAC DAC ABS_DAC PM_DAC ABS_PM_DAC ROA;
-  title 'Modified Jones Model — Summary Statistics';
-run; title;
+  title 'Modified Jones Model (S&P 500 firm-years) -- Summary Statistics';
+run;
+title;

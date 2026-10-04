@@ -10,9 +10,17 @@ whether **consistency in ESG-related language across sections of 10-K filings** 
 "ESG Narrative Consistency Index," or **ENCI**) is associated with **financial reporting
 quality**, proxied by discretionary accruals from the modified Jones model.
 
-**Sample:** S&P 500 constituents, fiscal years 1994–2024
+**Sample:** S&P 500 constituents (non-financial, non-utility).
+Accruals are computed for fiscal years 1994–2024. **ENCI is defined only for fiscal
+years ending on or after 1 December 2005**, when Item 1A (Risk Factors) became a
+required 10-K section; ENCI regressions therefore cover FY2005/06–2024.
+
 **Data sources:** WRDS (Compustat Fundamentals Annual, CRSP, CRSP/Compustat Merged,
 SEC Analytics Suite full-text filings)
+
+> **The published dashboard (`index.html`) is built from synthetic data** and is
+> watermarked as such. It demonstrates the visualization layer only; it is not an
+> empirical result.
 
 ## Research Questions
 
@@ -23,84 +31,127 @@ SEC Analytics Suite full-text filings)
 ## Repository Structure
 
 ```
-esg-accruals-repo/
+esg-narrative-consistency-accruals/
 ├── README.md
 ├── requirements.txt
+├── index.html                          # GitHub Pages copy of the dashboard (synthetic)
 ├── sas/
-│   ├── 00_setup_libraries.sas          # WRDS libname declarations + diagnostics
-│   ├── 01_sp500_universe.sas           # S&P 500 panel via Compustat + CCM + CRSP
-│   ├── 02_modified_jones_dac.sas       # Modified Jones / performance-matched DAC
-│   ├── 03_esg_text_intensity.sas       # PRXPARSE bag-of-words ESG intensity
-│   ├── 04_enci_construction.sas        # ENCI + sub-pillar + temporal measures
-│   └── 05_regression_models.sas        # Final panel regressions (PROC GLM)
+│   ├── run_all.sas                     # Driver: runs 00 → 05 in one session
+│   ├── run_all.sh                      # WRDS Cloud batch job (qsub) for run_all.sas
+│   ├── check_log.py                    # Summarises run_all.log: errors/warnings per program
+│   ├── 00_setup_libraries.sas          # Parameters, WRDS libraries, %winsorize, %assert_unique
+│   ├── 01_sp500_universe.sas           # Full Compustat universe + CCM link + S&P 500 flag
+│   ├── 02_modified_jones_dac.sas       # Modified Jones DA (full universe) + KLW performance matching
+│   ├── 03_esg_text_intensity.sas       # 10-K ↔ FYE matching, regex ESG word counts
+│   ├── 04_enci_construction.sas        # ENCI, pillar ENCI, temporal ENCI, ESG intensity
+│   └── 05_regression_models.sas        # FE regressions, firm-clustered SEs (PROC SURVEYREG)
 ├── python/
 │   ├── generate_sample_data.py         # Synthetic panel for demo / dev (no WRDS needed)
-│   ├── data_pipeline.py                # Load + clean SAS exports for analysis
+│   ├── data_pipeline.py                # Load + clean SAS export (panel + coefficient table)
 │   └── visualize.py                    # Builds the interactive HTML dashboard
 ├── data/
 │   └── (SAS .xlsx exports land here — gitignored)
 ├── outputs/
 │   └── enci_dashboard.html             # Interactive Plotly dashboard (generated)
 └── docs/
-    ├── research_proposal.md
     └── variable_definitions.md
 ```
 
 ## Pipeline
 
-The pipeline is split into two layers:
+### 1. SAS layer (runs on WRDS)
 
-### 1. SAS layer (runs on WRDS SAS Studio)
-Run scripts `00` → `05` in order. Each script reads the prior step's output dataset
-and writes the next one. The final step (`05_regression_models.sas`) exports
-`ESG_DA_panel.xlsx` containing the analysis panel and Jones model coefficients.
+Edit the parameters at the top of `00_setup_libraries.sas` (paths, sample years) and
+**verify the source-table names** with the diagnostics block in that file — in
+particular the GVKEY–CIK link table and the MD&A / Risk Factor text tables, whose
+names and column names are parameters (`&cik_link_tbl`, `&mda_tbl`, `&rf_tbl`, …).
+Output goes to `$HOME/esg_accruals` by default (set `wrds_path` to change it).
 
-```sas
-%include "00_setup_libraries.sas";
-%include "01_sp500_universe.sas";
-%include "02_modified_jones_dac.sas";
-%include "03_esg_text_intensity.sas";
-%include "04_enci_construction.sas";
-%include "05_regression_models.sas";
+**Batch on WRDS Cloud (recommended for a full run).** Copy the `sas/` folder to
+`~/esg_accruals/sas` on WRDS Cloud (e.g. `scp -r sas <user>@wrds-cloud.wharton.upenn.edu:esg_accruals/`
+or `git clone` the repo there), then:
+
+```bash
+ssh <user>@wrds-cloud.wharton.upenn.edu     # Duo approval required
+cd ~/esg_accruals/sas
+qsub run_all.sh                             # submit; qstat shows status
+# when the job is done:
+cat run_all.check.txt                       # errors / warnings per program
 ```
 
+`run_all.sh` writes `run_all.log`, `run_all.lst` and `run_all.check.txt`
+(the output of `check_log.py`). The checker attributes every `ERROR`,
+non-routine `WARNING` and suspicious `NOTE` (uninitialized variables,
+many-to-many MERGE, missing values generated, syntax-check mode, …) to the
+program that produced it, and lists the `%assert_unique` results and the
+row count of every dataset written. It can be run on any log:
+`python3 check_log.py run_all.log [--strict]`. If WRDS's grid scheduler has
+changed, run the same command directly: `CODE_PATH=$PWD sas run_all.sas`.
+
+**Interactive in SAS Studio:**
+
+```sas
+%let code_path = /home/<inst>/<user>/esg_accruals/sas;
+%include "&code_path./run_all.sas";
+```
+
+All steps share one WORK library, so run them in a single session. Each join is
+followed by `%assert_unique`, which writes an `ERROR:` line to the log if a key is
+duplicated.
+
+Design notes:
+
+- **Jones model on the full universe.** Total accruals and the cross-sectional
+  modified Jones regressions (with intercept) are estimated on all non-financial,
+  non-utility Compustat firms by SIC2 × fiscal year (≥ 10 obs per cell); S&P 500
+  members are selected afterwards.
+- **Total accruals** use the cash-flow approach, `TA = [IB − (OANCF − XIDOC)] / AT(t−1)`
+  (Hribar & Collins 2002).
+- **Lags** require the immediately preceding fiscal year; gaps leave lags missing.
+- **Performance matching** follows Kothari, Leone & Wasley (2005): each firm-year is
+  matched to the other firm in its SIC2-year with the closest ROA.
+- **Text alignment.** Each firm-year is matched to the first 10-K filed within 365
+  days after fiscal year-end; MD&A and Risk Factor text come from the same filing.
+- **Inference.** Firm and year fixed effects, standard errors clustered by firm.
+
+`05_regression_models.sas` writes `ESG_DA_panel.xlsx` with sheets `MainPanel`,
+`JonesCoefficients`, and `Coefficients` (regression estimates for H1, H2, the E/S/G
+models, and the performance-matched robustness model).
+
 ### 2. Python layer (runs locally, for visualization & portfolio)
-Since SAS output isn't great for interactive presentation, the Python layer turns
-the exported panel into a portfolio-ready interactive dashboard.
 
 ```bash
 pip install -r requirements.txt
 
-# Option A: use real SAS output
+# Option A: real SAS output (also extracts the Coefficients sheet)
 python python/data_pipeline.py --input data/ESG_DA_panel.xlsx
+python python/visualize.py --input data/panel_clean.csv
 
-# Option B: no WRDS access? generate a realistic synthetic panel
+# Option B: no WRDS access -- synthetic panel (dashboard is watermarked)
 python python/generate_sample_data.py
-
-# Build the dashboard (works on either real or synthetic data)
-python python/visualize.py
+python python/data_pipeline.py --input data/sample_panel.csv
+python python/visualize.py --input data/panel_clean.csv
 ```
 
-This produces `outputs/enci_dashboard.html` — a single self-contained interactive
-file you can open in any browser or embed in a portfolio site / GitHub Pages.
+This produces `outputs/enci_dashboard.html`, a single interactive file. Copy it to
+`index.html` to update the GitHub Pages site.
 
-## Suggested Visualization (Portfolio Showcase)
+## Dashboard
 
-The dashboard (`python/visualize.py`) renders four linked panels:
+`python/visualize.py` renders four linked panels:
 
-1. **ENCI vs. |Discretionary Accruals| scatter** with an OLS trendline and points
-   colored by ESG disclosure intensity — the core empirical result (H1) at a glance.
-2. **ESG intensity trends, 1994–2024** — separate lines for MD&A vs. Risk Factor
-   sections, showing the secular rise in ESG language and the MD&A/RF gap that
-   motivates ENCI.
-3. **Sub-pillar coefficient plot** (E / S / G) — bar chart of each pillar's ENCI
-   coefficient from `05_regression_models.sas`, with confidence intervals.
-4. **Interaction heatmap** — binned ESG intensity (rows) × ENCI (columns) showing
-   mean |DAC| in each cell, visually demonstrating the H2 interaction effect.
+1. **ENCI vs. |Discretionary Accruals| scatter** with a pooled OLS line (descriptive),
+   colored by ESG disclosure intensity.
+2. **ESG intensity by section over time** — MD&A vs. Risk Factors, with the Item 1A
+   start marked.
+3. **ENCI coefficient plot** (overall and E / S / G) with 95% confidence intervals from
+   the firm + year fixed-effects models with firm-clustered SEs. Uses the SAS
+   `Coefficients` sheet when available; otherwise re-estimates the same specification
+   in statsmodels.
+4. **Interaction heatmap** — ESG intensity quintile × ENCI quintile, mean |DAC| (H2).
 
-This combination is deliberately chosen because it tells the paper's story in one
-scrollable page: descriptive trend → main result → mechanism (sub-pillars) →
-interaction effect — without requiring the viewer to read the regression tables.
+Any dashboard built from `generate_sample_data.py` output is labeled
+**SYNTHETIC DEMO DATA**.
 
 ## Citation
 
@@ -108,6 +159,10 @@ If referencing the methodology, please cite the underlying models:
 
 - Jones, J. J. (1991). Earnings Management During Import Relief Investigations.
   *Journal of Accounting Research*, 29(2), 193–228.
+- Dechow, P. M., Sloan, R. G., & Sweeney, A. P. (1995). Detecting Earnings Management.
+  *The Accounting Review*, 70(2), 193–225.
+- Hribar, P., & Collins, D. W. (2002). Errors in Estimating Accruals: Implications for
+  Empirical Research. *Journal of Accounting Research*, 40(1), 105–134.
 - Kothari, S. P., Leone, A. J., & Wasley, C. E. (2005). Performance Matched
   Discretionary Accrual Measures. *Journal of Accounting and Economics*, 39(1), 163–197.
 - Baier, P., Berninger, M., & Kiesel, F. (2020). Environmental, Social and Governance
