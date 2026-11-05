@@ -13,6 +13,8 @@
           counts and ESG / E / S / G intensities
 ===========================================================================*/
 
+%require_readable(&mda_tbl &rf_tbl);
+
 /*---------------------------------------------------------------------------
   Step 3.1 -- Candidate CIKs per gvkey-datadate:
   date-valid links from &cik_link_tbl  UNION  comp.company CIK
@@ -25,11 +27,11 @@
     where not missing(cik_company);
   quit;
 
-  %if %sysfunc(exist(&cik_link_tbl)) %then %do;
+  %if %can_read(&cik_link_tbl) = 1 %then %do;
     proc sql;
       create table _cik_hist as
       select distinct a.gvkey, a.fyear, a.datadate,
-             input(cats(b.cik), ?? 32.) as cik_n
+             input(cats(b.cik), 12.) as cik_n   /* ?? is DATA-step-only */
       from DA_final a
       inner join &cik_link_tbl b
         on  a.gvkey = b.gvkey
@@ -38,7 +40,7 @@
     quit;
   %end;
   %else %do;
-    %put WARNING: [03] &cik_link_tbl not found -- using comp.company CIK only (no CIK history).;
+    %put WARNING: [03] &cik_link_tbl not readable -- using comp.company CIK only (no CIK history).;
     data _cik_hist; set _cik_cand (obs=0); run;
   %end;
 

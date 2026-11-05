@@ -6,7 +6,7 @@
 | `fyear` | Compustat fiscal year |
 | `sic_final` | Historical SIC (`sich`); `comp.company.sic` when `sich` is missing |
 | `SIC2` | Two-digit SIC, `int(sic_final / 100)`. SIC 49 and 60–69 excluded |
-| `sp500` | 1 if the firm (via CCM LU/LC link) is in CRSP's S&P 500 list at fiscal year-end |
+| `sp500` | 1 if the firm is an S&P 500 constituent at fiscal year-end: CRSP `msp500list` via CCM LU/LC link when CRSP is licensed, otherwise Compustat `idxcst_his` (`gvkeyx = '000003'`) matched on GVKEY |
 | `TA` | Total accruals, cash-flow approach: `[IB − (OANCF − XIDOC)] / AT(t−1)` |
 | `DAC` | Discretionary accruals — residual of the cross-sectional modified Jones model `TA = a + b1·(1/AT(t−1)) + b2·(ΔSALE − ΔRECT)/AT(t−1) + b3·PPEGT/AT(t−1)`, estimated by SIC2 × fyear on the full non-financial Compustat universe (≥ 10 obs per cell) |
 | `NDAC` | Fitted (non-discretionary) accruals from the same model |

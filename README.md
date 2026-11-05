@@ -15,8 +15,9 @@ Accruals are computed for fiscal years 1994–2024. **ENCI is defined only for f
 years ending on or after 1 December 2005**, when Item 1A (Risk Factors) became a
 required 10-K section; ENCI regressions therefore cover FY2005/06–2024.
 
-**Data sources:** WRDS (Compustat Fundamentals Annual, CRSP, CRSP/Compustat Merged,
-SEC Analytics Suite full-text filings)
+**Data sources:** WRDS (Compustat Fundamentals Annual and Index Constituents, SEC Analytics
+Suite full-text filings; CRSP/CCM used for S&P 500 membership only if licensed).
+`00_setup_libraries.sas` logs which source tables your account can read.
 
 > **The published dashboard (`index.html`) is built from synthetic data** and is
 > watermarked as such. It demonstrates the visualization layer only; it is not an
